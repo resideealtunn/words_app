@@ -1,0 +1,12 @@
+com.tekartik.sqflite-jetified-window-java-1.0.0-beta04-0 C:\Users\MONSTER\.gradle\caches\transforms-3\3740bc74f3ccb1b2ca0494eaf0684c87\transformed\jetified-window-java-1.0.0-beta04\res
+com.tekartik.sqflite-jetified-annotation-experimental-1.1.0-1 C:\Users\MONSTER\.gradle\caches\transforms-3\6a9a01ea7229bccb3ed1811cf95cb8b2\transformed\jetified-annotation-experimental-1.1.0\res
+com.tekartik.sqflite-core-1.6.0-2 C:\Users\MONSTER\.gradle\caches\transforms-3\87e24ee8689e985fbc596f6976aab002\transformed\core-1.6.0\res
+com.tekartik.sqflite-jetified-window-1.0.0-beta04-3 C:\Users\MONSTER\.gradle\caches\transforms-3\be87ff3b58bc171252b4850a1dd29885\transformed\jetified-window-1.0.0-beta04\res
+com.tekartik.sqflite-main-4 C:\Users\MONSTER\AppData\Local\Pub\Cache\hosted\pub.dev\sqflite-2.3.2\android\src\main\res
+com.tekartik.sqflite-release-5 C:\Users\MONSTER\AppData\Local\Pub\Cache\hosted\pub.dev\sqflite-2.3.2\android\src\release\res
+com.tekartik.sqflite-pngs-6 D:\personal\words\build\sqflite\generated\res\pngs\release
+com.tekartik.sqflite-resValues-7 D:\personal\words\build\sqflite\generated\res\resValues\release
+com.tekartik.sqflite-rs-8 D:\personal\words\build\sqflite\generated\res\rs\release
+com.tekartik.sqflite-mergeReleaseResources-9 D:\personal\words\build\sqflite\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.tekartik.sqflite-mergeReleaseResources-10 D:\personal\words\build\sqflite\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.tekartik.sqflite-merged_res-11 D:\personal\words\build\sqflite\intermediates\merged_res\release

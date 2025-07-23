@@ -1,0 +1,4 @@
+#Tue Jul 22 22:29:15 TRT 2025
+base.0=D\:\\personal\\words\\build\\app\\intermediates\\dex\\release\\minifyReleaseWithR8\\classes.dex
+path.0=classes.dex
+renamed.0=classes.dex
