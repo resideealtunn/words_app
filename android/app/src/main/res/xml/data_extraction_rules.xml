@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Include database files -->
+        <include domain="database" path="." />
+        
+        <!-- Include shared preferences -->
+        <include domain="sharedpref" path="." />
+        
+        <!-- Include internal files -->
+        <include domain="file" path="." />
+    </cloud-backup>
+    
+    <device-transfer>
+        <!-- Include database files -->
+        <include domain="database" path="." />
+        
+        <!-- Include shared preferences -->
+        <include domain="sharedpref" path="." />
+        
+        <!-- Include internal files -->
+        <include domain="file" path="." />
+    </device-transfer>
+</data-extraction-rules> 
