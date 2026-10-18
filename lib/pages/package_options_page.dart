@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import '../models/package.dart';
 import '../database/database_helper.dart';
+import '../widgets/practice_scope_sheet.dart';
 import 'add_word_page.dart';
 import 'add_word_group_page.dart';
 import 'update_words_page.dart';
 import 'view_list_page.dart';
-import 'practice_page.dart';
 import 'test_yourself_page.dart';
 
 class PackageOptionsPage extends StatefulWidget {
@@ -244,11 +244,10 @@ class _PackageOptionsPageState extends State<PackageOptionsPage> {
                       context,
                       'Practice',
                       Icons.school,
-                      'Learn and memorize',
-                      () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (context) => PracticePage(package: currentPackage),
-                        ),
+                      'Cards by type / list',
+                      () => showPracticeScopeSheet(
+                        context,
+                        package: currentPackage,
                       ),
                     ),
                     _buildOptionCard(
@@ -340,29 +339,4 @@ class _PackageOptionsPageState extends State<PackageOptionsPage> {
     );
   }
 
-  void _showComingSoon(BuildContext context, String feature) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(
-              Icons.construction,
-              color: const Color(0xFF8DC71D),
-            ),
-            const SizedBox(width: 8),
-            const Text('Coming Soon'),
-          ],
-        ),
-        content: Text('$feature feature will be available soon!'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
 } 

@@ -1,42 +1,60 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
+
+import '../constants/word_types.dart';
+import '../database/database_helper.dart';
 import '../models/package.dart';
 import '../models/word.dart';
-import '../database/database_helper.dart';
+import '../widgets/part_of_speech_picker.dart';
 
 enum LanguageMode { englishToTurkish, turkishToEnglish }
 
+/// Practice flashcards for a package, a custom list, or study-later words.
 class PracticePage extends StatefulWidget {
-  final Package package;
+  final Package? package;
+  final List<Word>? initialWords;
+  final String title;
+  final bool studyLaterOnly;
 
-  const PracticePage({super.key, required this.package});
+  const PracticePage({
+    super.key,
+    this.package,
+    this.initialWords,
+    this.title = 'Practice',
+    this.studyLaterOnly = false,
+  });
 
   @override
   State<PracticePage> createState() => _PracticePageState();
 }
 
-class _PracticePageState extends State<PracticePage> with TickerProviderStateMixin {
-  final DatabaseHelper _databaseHelper = DatabaseHelper();
-  
-  List<Word> _allWords = [];
+class _PracticePageState extends State<PracticePage>
+    with SingleTickerProviderStateMixin {
+  final DatabaseHelper _db = DatabaseHelper();
+
+  List<Word> _sourceWords = [];
   List<Word> _practiceWords = [];
+  List<String> _availableTypes = [];
+  String _typeFilter = 'all';
   bool _isLoading = true;
   LanguageMode _languageMode = LanguageMode.englishToTurkish;
   int _currentIndex = 0;
   bool _isFlipped = false;
-  
-  late AnimationController _flipController;
-  late Animation<double> _flipAnimation;
+
+  late final AnimationController _flipController;
+  late final Animation<double> _flipAnimation;
 
   @override
   void initState() {
     super.initState();
     _flipController = AnimationController(
-      duration: const Duration(milliseconds: 500),
+      duration: const Duration(milliseconds: 450),
       vsync: this,
     );
-    _flipAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _flipController, curve: Curves.easeInOut),
+    _flipAnimation = CurvedAnimation(
+      parent: _flipController,
+      curve: Curves.easeInOut,
     );
     _loadWords();
   }
@@ -48,47 +66,67 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
   }
 
   Future<void> _loadWords() async {
-    setState(() {
-      _isLoading = true;
-    });
-
+    setState(() => _isLoading = true);
     try {
-      final words = await _databaseHelper.getWordsByPackage(widget.package.id!);
+      List<Word> words;
+      if (widget.initialWords != null) {
+        words = List<Word>.from(widget.initialWords!);
+      } else if (widget.studyLaterOnly) {
+        words = await _db.getStudyLaterWords();
+        if (widget.package?.id != null) {
+          words = words
+              .where((w) => w.packageId == widget.package!.id)
+              .toList();
+        }
+      } else {
+        words = await _db.getWordsByPackage(widget.package!.id!);
+      }
+
+      final types = <String>{};
+      for (final w in words) {
+        types.addAll(parseWordTypes(w.partOfSpeech));
+      }
+
+      if (!mounted) return;
       setState(() {
-        _allWords = words;
-        _practiceWords = List.from(words)..shuffle();
+        _sourceWords = words;
+        _availableTypes = types.toList()..sort();
+        _applyFilter(shuffle: true);
         _isLoading = false;
       });
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-      });
+      if (!mounted) return;
+      setState(() => _isLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error loading words: $e'),
           backgroundColor: Colors.red[400],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
     }
   }
 
-  void _changeLanguageMode(LanguageMode mode) {
+  void _applyFilter({bool shuffle = false}) {
+    var filtered = _sourceWords
+        .where((w) => wordMatchesTypeFilter(w.partOfSpeech, _typeFilter))
+        .toList();
+    if (shuffle) filtered.shuffle();
+    _practiceWords = filtered;
+    _currentIndex = 0;
+    _isFlipped = false;
+    _flipController.reset();
+  }
+
+  void _setTypeFilter(String? value) {
     setState(() {
-      _languageMode = mode;
-      _isFlipped = false;
-      _flipController.reset();
+      _typeFilter = value ?? 'all';
+      _applyFilter(shuffle: true);
     });
   }
 
   void _flipCard() {
     if (_practiceWords.isEmpty) return;
-    
-    setState(() {
-      _isFlipped = !_isFlipped;
-    });
-    
+    setState(() => _isFlipped = !_isFlipped);
     if (_isFlipped) {
       _flipController.forward();
     } else {
@@ -98,7 +136,6 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
 
   void _nextCard() {
     if (_practiceWords.isEmpty) return;
-    
     setState(() {
       _currentIndex = (_currentIndex + 1) % _practiceWords.length;
       _isFlipped = false;
@@ -108,96 +145,81 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
 
   void _previousCard() {
     if (_practiceWords.isEmpty) return;
-    
     setState(() {
-      _currentIndex = (_currentIndex - 1 + _practiceWords.length) % _practiceWords.length;
+      _currentIndex =
+          (_currentIndex - 1 + _practiceWords.length) % _practiceWords.length;
       _isFlipped = false;
       _flipController.reset();
     });
   }
 
   void _shuffleWords() {
+    setState(() => _applyFilter(shuffle: true));
+  }
+
+  void _replaceWord(Word updated) {
     setState(() {
-      _practiceWords.shuffle();
-      _currentIndex = 0;
-      _isFlipped = false;
-      _flipController.reset();
+      final i = _practiceWords.indexWhere((w) => w.id == updated.id);
+      if (i >= 0) _practiceWords[i] = updated;
+      final j = _sourceWords.indexWhere((w) => w.id == updated.id);
+      if (j >= 0) _sourceWords[j] = updated;
     });
   }
 
-  String _getLanguageModeText(LanguageMode mode) {
-    switch (mode) {
-      case LanguageMode.englishToTurkish:
-        return 'EN → TR';
-      case LanguageMode.turkishToEnglish:
-        return 'TR → EN';
-    }
+  Future<void> _toggleStudyLater(Word word) async {
+    if (word.id == null) return;
+    final next = !word.studyLater;
+    await _db.setStudyLater(word.id!, next);
+    _replaceWord(word.copyWith(studyLater: next));
+  }
+
+  Future<void> _toggleLearned(Word word) async {
+    if (word.id == null) return;
+    final next = !word.isLearned;
+    await _db.setWordLearned(word.id!, next);
+    _replaceWord(word.copyWith(isLearned: next, studyLater: next ? false : word.studyLater));
   }
 
   @override
   Widget build(BuildContext context) {
+    final title = widget.package != null
+        ? '${widget.title} — ${widget.package!.name}'
+        : widget.title;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text(
-          'Practice - ${widget.package.name}',
-          style: const TextStyle(color: Color(0xFF8DC71D)),
-        ),
+        title: Text(title, style: const TextStyle(color: Color(0xFF8DC71D))),
         backgroundColor: Colors.black,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Color(0xFF8DC71D)),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
+        foregroundColor: const Color(0xFF8DC71D),
         actions: [
-          // Language Mode Button
+          if (_availableTypes.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: PartOfSpeechFilterDropdown(
+                value: _typeFilter,
+                availableTypes: _availableTypes,
+                onChanged: _setTypeFilter,
+                dark: true,
+              ),
+            ),
           PopupMenuButton<LanguageMode>(
             icon: const Icon(Icons.language, color: Color(0xFF8DC71D)),
-            onSelected: _changeLanguageMode,
-            itemBuilder: (context) => [
+            onSelected: (mode) {
+              setState(() {
+                _languageMode = mode;
+                _isFlipped = false;
+                _flipController.reset();
+              });
+            },
+            itemBuilder: (context) => const [
               PopupMenuItem(
                 value: LanguageMode.englishToTurkish,
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.arrow_forward,
-                      color: _languageMode == LanguageMode.englishToTurkish 
-                          ? const Color(0xFF8DC71D) 
-                          : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'English → Turkish',
-                      style: TextStyle(
-                        color: _languageMode == LanguageMode.englishToTurkish 
-                            ? const Color(0xFF8DC71D) 
-                            : Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
+                child: Text('English → Turkish'),
               ),
               PopupMenuItem(
                 value: LanguageMode.turkishToEnglish,
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.arrow_back,
-                      color: _languageMode == LanguageMode.turkishToEnglish 
-                          ? const Color(0xFF8DC71D) 
-                          : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Turkish → English',
-                      style: TextStyle(
-                        color: _languageMode == LanguageMode.turkishToEnglish 
-                            ? const Color(0xFF8DC71D) 
-                            : Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
+                child: Text('Turkish → English'),
               ),
             ],
           ),
@@ -205,137 +227,110 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
       ),
       body: _isLoading
           ? const Center(
-              child: CircularProgressIndicator(
-                color: Color(0xFF8DC71D),
-              ),
+              child: CircularProgressIndicator(color: Color(0xFF8DC71D)),
             )
           : _practiceWords.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.school,
-                        size: 64,
-                        color: Colors.grey[600],
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'No words to practice',
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 18,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Add some words to this package first',
-                        style: TextStyle(
-                          color: Colors.grey[500],
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-                )
+              ? _emptyState()
               : Column(
                   children: [
-                    // Progress and Info
-                    Container(
-                      padding: const EdgeInsets.all(16),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                       child: Row(
                         children: [
                           Text(
-                            'Mode: ${_getLanguageModeText(_languageMode)}',
-                            style: const TextStyle(
-                              color: Color(0xFF8DC71D),
-                              fontSize: 14,
-                            ),
+                            _languageMode == LanguageMode.englishToTurkish
+                                ? 'EN → TR'
+                                : 'TR → EN',
+                            style: const TextStyle(color: Color(0xFF8DC71D)),
                           ),
+                          if (_typeFilter != 'all') ...[
+                            const SizedBox(width: 8),
+                            Chip(
+                              label: Text(
+                                kWordTypeLabels[_typeFilter] ?? _typeFilter,
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              backgroundColor:
+                                  const Color(0xFF8DC71D).withValues(alpha: 0.2),
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          ],
                           const Spacer(),
                           Text(
                             '${_currentIndex + 1} / ${_practiceWords.length}',
-                            style: TextStyle(
-                              color: Colors.grey[600],
-                              fontSize: 14,
-                            ),
+                            style: TextStyle(color: Colors.grey[500]),
                           ),
                         ],
                       ),
                     ),
-
-                    // Word Card
                     Expanded(
-                      child: Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: GestureDetector(
-                            onTap: _flipCard,
-                            child: AnimatedBuilder(
-                              animation: _flipAnimation,
-                              builder: (context, child) {
-                                final isBackVisible = _flipAnimation.value >= 0.5;
-                                return Transform(
-                                  alignment: Alignment.center,
-                                  transform: Matrix4.identity()
-                                    ..setEntry(3, 2, 0.001)
-                                    ..rotateY(_flipAnimation.value * 3.14159),
-                                  child: isBackVisible
-                                      ? Transform(
-                                          alignment: Alignment.center,
-                                          transform: Matrix4.identity()..rotateY(3.14159),
-                                          child: _buildBackCard(),
-                                        )
-                                      : _buildFrontCard(),
-                                );
-                              },
-                            ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: GestureDetector(
+                          onTap: _flipCard,
+                          child: AnimatedBuilder(
+                            animation: _flipAnimation,
+                            builder: (context, _) {
+                              final showBack = _flipAnimation.value >= 0.5;
+                              return Transform(
+                                alignment: Alignment.center,
+                                transform: Matrix4.identity()
+                                  ..setEntry(3, 2, 0.001)
+                                  ..rotateY(_flipAnimation.value * 3.14159),
+                                child: showBack
+                                    ? Transform(
+                                        alignment: Alignment.center,
+                                        transform: Matrix4.identity()
+                                          ..rotateY(3.14159),
+                                        child: _buildBackCard(
+                                          _practiceWords[_currentIndex],
+                                        ),
+                                      )
+                                    : _buildFrontCard(
+                                        _practiceWords[_currentIndex],
+                                      ),
+                              );
+                            },
                           ),
                         ),
                       ),
                     ),
-
-                    // Navigation Buttons
-                    Container(
-                      padding: const EdgeInsets.all(16),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
                           IconButton(
                             onPressed: _previousCard,
-                            icon: const Icon(Icons.arrow_back, color: Color(0xFF8DC71D)),
-                            iconSize: 32,
+                            icon: const Icon(Icons.arrow_back,
+                                color: Color(0xFF8DC71D), size: 32),
                           ),
                           ElevatedButton.icon(
                             onPressed: _flipCard,
-                            icon: Icon(_isFlipped ? Icons.visibility_off : Icons.visibility),
-                            label: Text(_isFlipped ? 'Hide Answer' : 'Show Answer'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF8DC71D),
-                              foregroundColor: Colors.black,
-                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                            icon: Icon(
+                              _isFlipped
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
                             ),
+                            label: Text(_isFlipped ? 'Hide' : 'Reveal'),
                           ),
                           IconButton(
                             onPressed: _nextCard,
-                            icon: const Icon(Icons.arrow_forward, color: Color(0xFF8DC71D)),
-                            iconSize: 32,
+                            icon: const Icon(Icons.arrow_forward,
+                                color: Color(0xFF8DC71D), size: 32),
                           ),
                         ],
                       ),
                     ),
-
-                    // Shuffle Button
-                    Container(
+                    Padding(
                       padding: const EdgeInsets.only(bottom: 16),
                       child: OutlinedButton.icon(
                         onPressed: _shuffleWords,
                         icon: const Icon(Icons.shuffle),
-                        label: const Text('Shuffle Words'),
+                        label: const Text('Shuffle'),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFF8DC71D),
                           side: const BorderSide(color: Color(0xFF8DC71D)),
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                         ),
                       ),
                     ),
@@ -344,343 +339,234 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
     );
   }
 
-  Widget _buildFrontCard() {
-    final word = _practiceWords[_currentIndex];
-    final displayText = _languageMode == LanguageMode.englishToTurkish
+  Widget _emptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.school, size: 64, color: Colors.grey[600]),
+          const SizedBox(height: 16),
+          Text(
+            _typeFilter == 'all'
+                ? 'No words to practice'
+                : 'No words for this type',
+            style: TextStyle(color: Colors.grey[500], fontSize: 18),
+          ),
+          if (_typeFilter != 'all') ...[
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () => _setTypeFilter('all'),
+              child: const Text('Show all types'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _cardShell({required Widget child}) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.grey[900],
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF8DC71D), width: 2),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _buildFrontCard(Word word) {
+    final prompt = _languageMode == LanguageMode.englishToTurkish
         ? word.englishWord
         : word.turkishMeaning;
 
-    return Container(
-      width: double.infinity,
-      height: 500,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            const Color(0xFF8DC71D).withOpacity(0.1),
-            Colors.grey[900]!,
-            Colors.grey[800]!,
-          ],
-          stops: const [0.0, 0.6, 1.0],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF8DC71D), width: 3),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF8DC71D).withOpacity(0.4),
-            blurRadius: 15,
-            spreadRadius: 3,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
+    return _cardShell(
       child: Stack(
         children: [
-          // Background pattern
-          Positioned(
-            top: -50,
-            right: -50,
-            child: Container(
-              width: 150,
-              height: 150,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF8DC71D).withOpacity(0.05),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -30,
-            left: -30,
-            child: Container(
-              width: 100,
-              height: 100,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF8DC71D).withOpacity(0.08),
-              ),
-            ),
-          ),
-          
-          // Main content
           Center(
             child: Padding(
-              padding: const EdgeInsets.all(24),
+              padding: const EdgeInsets.all(28),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Animated tap icon
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF8DC71D).withOpacity(0.2),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: const Color(0xFF8DC71D).withOpacity(0.5),
-                        width: 2,
+                  if (word.partOfSpeech != null &&
+                      word.partOfSpeech!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Chip(
+                        label: Text(word.partOfSpeech!),
+                        backgroundColor:
+                            const Color(0xFF8DC71D).withValues(alpha: 0.2),
                       ),
                     ),
-                    child: Icon(
-                      Icons.touch_app,
-                      size: 32,
-                      color: const Color(0xFF8DC71D),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  
                   Text(
-                    'Tap to reveal answer',
-                    style: TextStyle(
-                      color: Colors.grey[500],
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  
-                  // Word in a beautiful container
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.4),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: const Color(0xFF8DC71D).withOpacity(0.3),
-                        width: 1,
-                      ),
-                    ),
-                    child: Text(
-                      displayText,
-                      style: const TextStyle(
-                        color: Color(0xFF8DC71D),
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.2,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                  
-                  const SizedBox(height: 24),
-                  
-                  // Language mode indicator
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF8DC71D).withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      _getLanguageModeText(_languageMode),
-                      style: TextStyle(
-                        color: Colors.grey[400],
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBackCard() {
-    final word = _practiceWords[_currentIndex];
-    final questionText = _languageMode == LanguageMode.englishToTurkish
-        ? word.englishWord
-        : word.turkishMeaning;
-    final answerText = _languageMode == LanguageMode.englishToTurkish
-        ? word.turkishMeaning
-        : word.englishWord;
-
-    return Container(
-      width: double.infinity,
-      height: 500, // Increased height to fit all content
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Colors.grey[900]!,
-            Colors.grey[800]!,
-          ],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF8DC71D), width: 3),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF8DC71D).withOpacity(0.4),
-            blurRadius: 15,
-            spreadRadius: 3,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Question Section
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF8DC71D).withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                questionText,
-                style: const TextStyle(
-                  color: Color(0xFF8DC71D),
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-            const SizedBox(height: 12),
-            
-            // Answer Section
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.3),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF8DC71D).withOpacity(0.3)),
-              ),
-              child: Column(
-                children: [
-                  Text(
-                    'Answer:',
-                    style: TextStyle(
-                      color: Colors.grey[400],
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    answerText,
+                    prompt,
                     style: const TextStyle(
                       color: Color(0xFF8DC71D),
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 34,
+                      fontWeight: FontWeight.bold,
                     ),
                     textAlign: TextAlign.center,
                   ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Tap to reveal',
+                    style: TextStyle(color: Colors.grey[500]),
+                  ),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
-            
-            // Content Grid - Image and Details side by side
-            Expanded(
-              child: Row(
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: IconButton(
+              tooltip: word.studyLater ? 'Remove study later' : 'Study later',
+              onPressed: () => _toggleStudyLater(word),
+              icon: Icon(
+                word.studyLater ? Icons.bookmark : Icons.bookmark_border,
+                color: Colors.amber,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBackCard(Word word) {
+    final answer = _languageMode == LanguageMode.englishToTurkish
+        ? word.turkishMeaning
+        : word.englishWord;
+    final prompt = _languageMode == LanguageMode.englishToTurkish
+        ? word.englishWord
+        : word.turkishMeaning;
+
+    return _cardShell(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    prompt,
+                    style: const TextStyle(
+                      color: Color(0xFF8DC71D),
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => _toggleStudyLater(word),
+                  icon: Icon(
+                    word.studyLater ? Icons.bookmark : Icons.bookmark_border,
+                    color: Colors.amber,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Left side - Image (if exists)
-                  if (word.imagePath != null) ...[
-                    Expanded(
-                      flex: 1,
-                      child: GestureDetector(
-                        onTap: () => _showImageDialog(word.imagePath!),
-                        child: Container(
-                          height: double.infinity,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: const Color(0xFF8DC71D).withOpacity(0.5), width: 2),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF8DC71D).withOpacity(0.2),
-                                blurRadius: 8,
-                                spreadRadius: 1,
-                              ),
-                            ],
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: Stack(
-                              children: [
-                                Image.file(
-                                  File(word.imagePath!),
-                                  fit: BoxFit.cover,
-                                  width: double.infinity,
-                                  height: double.infinity,
-                                ),
-                                // Tap to enlarge overlay
-                                Positioned(
-                                  top: 6,
-                                  right: 6,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.7),
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                    child: const Icon(
-                                      Icons.zoom_in,
-                                      color: Colors.white,
-                                      size: 14,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                  _section('Meaning', answer, large: true),
+                  if (word.partOfSpeech != null &&
+                      word.partOfSpeech!.isNotEmpty)
+                    _section('Type', word.partOfSpeech!),
+                  if (word.exampleSentence != null &&
+                      word.exampleSentence!.isNotEmpty)
+                    _section('Example', word.exampleSentence!),
+                  if (word.exampleSentenceTr != null &&
+                      word.exampleSentenceTr!.isNotEmpty)
+                    _section('Example (TR)', word.exampleSentenceTr!),
+                  if (word.synonyms.isNotEmpty)
+                    _chips('Synonyms', word.synonyms),
+                  if (word.antonyms.isNotEmpty)
+                    _chips('Antonyms', word.antonyms),
+                  if (word.otherForms.isNotEmpty)
+                    _chips('Other forms', word.otherForms),
+                  if (word.description != null &&
+                      word.description!.isNotEmpty)
+                    _section('Notes', word.description!),
+                  if (word.imagePath != null &&
+                      word.imagePath!.isNotEmpty &&
+                      File(word.imagePath!).existsSync()) ...[
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.file(
+                        File(word.imagePath!),
+                        height: 160,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        filterQuality: FilterQuality.high,
+                        gaplessPlayback: true,
                       ),
                     ),
-                    const SizedBox(width: 12),
                   ],
-                  
-                  // Right side - Text Details
-                  Expanded(
-                    flex: word.imagePath != null ? 1 : 2,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Description
-                        if (word.description != null) ...[
-                          _buildCompactDetailRow('Description:', word.description!),
-                          const SizedBox(height: 12),
-                        ],
-                        
-                        // Example Sentence
-                        if (word.exampleSentence != null) ...[
-                          _buildCompactDetailRow('Example:', word.exampleSentence!),
-                        ],
-                        
-                        // If no description or example, show a placeholder
-                        if (word.description == null && word.exampleSentence == null) ...[
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.grey[700]!.withOpacity(0.5)),
-                            ),
-                            child: Text(
-                              'No additional details available for this word.',
-                              style: TextStyle(
-                                color: Colors.grey[500],
-                                fontSize: 12,
-                                fontStyle: FontStyle.italic,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ],
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => _toggleLearned(word),
+                      icon: Icon(
+                        word.isLearned
+                            ? Icons.check_circle
+                            : Icons.check_circle_outline,
+                      ),
+                      label: Text(
+                        word.isLearned ? 'Learned ✓' : 'Mark as learned',
+                      ),
                     ),
                   ),
                 ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _section(String label, String value, {bool large = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.25),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: const Color(0xFF8DC71D).withValues(alpha: 0.25),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: Colors.grey[500],
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: TextStyle(
+                color: Colors.grey[200],
+                fontSize: large ? 20 : 14,
+                fontWeight: large ? FontWeight.w600 : FontWeight.w400,
+                height: 1.35,
               ),
             ),
           ],
@@ -689,179 +575,37 @@ class _PracticePageState extends State<PracticePage> with TickerProviderStateMix
     );
   }
 
-  Widget _buildDetailRow(String label, String value) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 80,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: Colors.grey[500],
-              fontSize: 14,
-            ),
-          ),
-        ),
-        Expanded(
-          child: Text(
-            value,
-            style: TextStyle(
-              color: Colors.grey[400],
-              fontSize: 14,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildEnhancedDetailRow(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.2),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.grey[700]!.withOpacity(0.5)),
-      ),
+  Widget _chips(String label, List<String> items) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             label,
             style: TextStyle(
-              color: Colors.grey[400],
-              fontSize: 12,
+              color: Colors.grey[500],
+              fontSize: 11,
               fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            value,
-            style: TextStyle(
-              color: Colors.grey[300],
-              fontSize: 14,
-              fontWeight: FontWeight.w400,
-              height: 1.4,
-            ),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: items
+                .map(
+                  (e) => Chip(
+                    label: Text(e, style: const TextStyle(fontSize: 12)),
+                    visualDensity: VisualDensity.compact,
+                    backgroundColor:
+                        const Color(0xFF8DC71D).withValues(alpha: 0.15),
+                  ),
+                )
+                .toList(),
           ),
         ],
       ),
     );
   }
-
-  Widget _buildCompactDetailRow(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.2),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey[700]!.withOpacity(0.5)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.grey[400],
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: TextStyle(
-              color: Colors.grey[300],
-              fontSize: 12,
-              fontWeight: FontWeight.w400,
-              height: 1.3,
-            ),
-            maxLines: 4,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showImageDialog(String imagePath) {
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.9),
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.8,
-            maxWidth: MediaQuery.of(context).size.width * 0.9,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Close button
-              Align(
-                alignment: Alignment.topRight,
-                child: IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.7),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.close,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              // Image
-              Flexible(
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF8DC71D).withOpacity(0.3),
-                        blurRadius: 20,
-                        spreadRadius: 5,
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Image.file(
-                      File(imagePath),
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              // Tap to close hint
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const Text(
-                  'Tap outside to close',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-} 
+}
