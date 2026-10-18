@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/package.dart';
 import '../database/database_helper.dart';
 import '../services/backup_service.dart';
@@ -14,24 +15,54 @@ class PackagesPage extends StatefulWidget {
 }
 
 class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver {
+  static const _sortPrefKey = 'packages_sort_mode';
+
   final DatabaseHelper _databaseHelper = DatabaseHelper();
   final BackupService _backupService = BackupService();
+  final TextEditingController _searchController = TextEditingController();
+
   List<Package> _packages = [];
   bool _isLoading = true;
   bool _isBusy = false;
+  PackageSort _sort = PackageSort.dayOrder;
+  String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _searchController.addListener(() {
+      setState(() => _searchQuery = _searchController.text);
+    });
+    _restoreSortPreference();
     _loadPackages();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _searchController.dispose();
     super.dispose();
   }
+
+  Future<void> _restoreSortPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = PackageSortLabel.fromStorage(prefs.getString(_sortPrefKey));
+    if (!mounted) return;
+    setState(() => _sort = stored);
+  }
+
+  Future<void> _setSort(PackageSort sort) async {
+    setState(() => _sort = sort);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_sortPrefKey, sort.name);
+  }
+
+  List<Package> get _visiblePackages => filterAndSortPackages(
+        _packages,
+        query: _searchQuery,
+        sort: _sort,
+      );
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -655,75 +686,29 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
               ),
             )
           : _packages.isEmpty
-              ? LayoutBuilder(
-                  builder: (context, constraints) {
-                    return SizedBox(
-                      width: constraints.maxWidth,
-                      height: constraints.maxHeight,
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 420),
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(32, 32, 32, 96),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.all(24),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF8DC71D)
-                                        .withValues(alpha: 0.1),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.folder_open,
-                                    size: 64,
-                                    color: Color(0xFF8DC71D),
-                                  ),
-                                ),
-                                const SizedBox(height: 24),
-                                Text(
-                                  'No packages yet',
-                                  textAlign: TextAlign.center,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .headlineMedium
-                                      ?.copyWith(
-                                        color: Colors.grey[700],
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                ),
-                                const SizedBox(height: 12),
-                                Text(
-                                  'Create your first word package to start learning',
-                                  textAlign: TextAlign.center,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .bodyLarge
-                                      ?.copyWith(color: Colors.grey[600]),
-                                ),
-                              ],
+              ? _buildEmptyState()
+              : Column(
+                  children: [
+                    _buildSearchAndSortBar(),
+                    _buildSortHint(),
+                    Expanded(
+                      child: _visiblePackages.isEmpty
+                          ? _buildNoSearchResults()
+                          : ListView.builder(
+                              padding:
+                                  const EdgeInsets.fromLTRB(16, 0, 16, 96),
+                              itemCount: _visiblePackages.length + 1,
+                              itemBuilder: (context, index) {
+                                if (index == 0) {
+                                  return _buildOverallProgressCard();
+                                }
+                                final package =
+                                    _visiblePackages[index - 1];
+                                return _buildPackageCard(context, package);
+                              },
                             ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                )
-              : Container(
-                  color: Colors.grey[50],
-                  child: ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-                    itemCount: _packages.length + 1,
-                    itemBuilder: (context, index) {
-                      if (index == 0) {
-                        return _buildOverallProgressCard();
-                      }
-                      final package = _packages[index - 1];
-                      return _buildPackageCard(context, package);
-                    },
-                  ),
+                    ),
+                  ],
                 ),
       floatingActionButton: Container(
         decoration: BoxDecoration(
@@ -753,6 +738,191 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
 
   double get _overallPercent =>
       _totalWords == 0 ? 0 : (_totalLearned / _totalWords) * 100;
+
+  Widget _buildSearchAndSortBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: 'Search packages by name…',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () => _searchController.clear(),
+                      ),
+                filled: true,
+                fillColor: Colors.white,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 0,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey[300]!),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey[300]!),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(
+                    color: Color(0xFF8DC71D),
+                    width: 1.5,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Material(
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: Colors.grey[300]!),
+            ),
+            child: PopupMenuButton<PackageSort>(
+              tooltip: 'Sort packages',
+              initialValue: _sort,
+              onSelected: _setSort,
+              itemBuilder: (context) => PackageSort.values
+                  .map(
+                    (s) => CheckedPopupMenuItem<PackageSort>(
+                      value: s,
+                      checked: s == _sort,
+                      child: Text(s.label),
+                    ),
+                  )
+                  .toList(),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.sort, color: Colors.grey[800]),
+                    const SizedBox(width: 4),
+                    Icon(Icons.arrow_drop_down, color: Colors.grey[700]),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSortHint() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          'Sorted by: ${_sort.label}'
+          '${_searchQuery.trim().isEmpty ? '' : ' · ${_visiblePackages.length} shown'}',
+          style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SizedBox(
+          width: constraints.maxWidth,
+          height: constraints.maxHeight,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(32, 32, 32, 96),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color:
+                            const Color(0xFF8DC71D).withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.folder_open,
+                        size: 64,
+                        color: Color(0xFF8DC71D),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'No packages yet',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineMedium
+                          ?.copyWith(
+                            color: Colors.grey[700],
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Create your first word package to start learning',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodyLarge
+                          ?.copyWith(color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildNoSearchResults() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off, size: 56, color: Colors.grey[400]),
+            const SizedBox(height: 12),
+            Text(
+              'No packages match “$_searchQuery”',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey[700],
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => _searchController.clear(),
+              child: const Text('Clear search'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _buildOverallProgressCard() {
     final completedDays =
@@ -806,6 +976,9 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: () async {
+          if (package.id != null) {
+            await _databaseHelper.touchPackageOpened(package.id!);
+          }
           await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (context) => PackageOptionsPage(package: package),

@@ -46,7 +46,7 @@ class DatabaseHelper {
 
     final db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -67,6 +67,7 @@ class DatabaseHelper {
         name TEXT NOT NULL,
         description TEXT NOT NULL,
         createdAt INTEGER NOT NULL,
+        lastOpenedAt INTEGER,
         wordCount INTEGER DEFAULT 0
       )
     ''');
@@ -125,6 +126,11 @@ class DatabaseHelper {
       await _addColumnIfMissing(db, 'words', 'studyLater', 'INTEGER DEFAULT 0');
       print('Words table upgraded to rich vocabulary schema');
     }
+
+    if (oldVersion < 4) {
+      await _addColumnIfMissing(db, 'packages', 'lastOpenedAt', 'INTEGER');
+      print('Packages table upgraded with lastOpenedAt');
+    }
   }
 
   Future<void> _addColumnIfMissing(
@@ -148,7 +154,7 @@ class DatabaseHelper {
 
       if (!tableNames.contains('packages') || !tableNames.contains('words')) {
         print('Database tables missing — recreating schema');
-        await _onCreate(db, 3);
+        await _onCreate(db, 4);
       }
 
       await db.query('packages', limit: 1);
@@ -223,13 +229,14 @@ class DatabaseHelper {
 
   Future<List<Package>> getAllPackages() async {
     final db = await database;
-    // Live word / learned counts + Day 1 → Day N ordering in Dart.
+    // Live word / learned counts; caller chooses sort order.
     final maps = await db.rawQuery('''
       SELECT
         p.id,
         p.name,
         p.description,
         p.createdAt,
+        p.lastOpenedAt,
         COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id), 0) AS wordCount,
         COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id AND w.isLearned = 1), 0) AS learnedCount
       FROM packages p
@@ -248,6 +255,7 @@ class DatabaseHelper {
         p.name,
         p.description,
         p.createdAt,
+        p.lastOpenedAt,
         COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id), 0) AS wordCount,
         COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id AND w.isLearned = 1), 0) AS learnedCount
       FROM packages p
@@ -257,6 +265,17 @@ class DatabaseHelper {
     );
     if (maps.isEmpty) return null;
     return Package.fromMap(maps.first);
+  }
+
+  /// Marks a package as opened now (for "Recently opened" sort).
+  Future<void> touchPackageOpened(int packageId) async {
+    final db = await database;
+    await db.update(
+      'packages',
+      {'lastOpenedAt': DateTime.now().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [packageId],
+    );
   }
 
   Future<void> setWordLearned(int wordId, bool learned) async {

@@ -74,12 +74,14 @@ class _ParsedPackage {
   final String name;
   final String description;
   final DateTime createdAt;
+  final DateTime? lastOpenedAt;
   final List<_ParsedWord> words;
 
   const _ParsedPackage({
     required this.name,
     required this.description,
     required this.createdAt,
+    this.lastOpenedAt,
     required this.words,
   });
 }
@@ -252,6 +254,7 @@ class BackupService {
               name: incoming.name,
               description: incoming.description,
               createdAt: incoming.createdAt,
+              lastOpenedAt: incoming.lastOpenedAt,
               wordCount: 0,
             ),
           );
@@ -260,6 +263,7 @@ class BackupService {
             name: incoming.name,
             description: incoming.description,
             createdAt: incoming.createdAt,
+            lastOpenedAt: incoming.lastOpenedAt,
             wordCount: 0,
           );
           packagesByName[key] = target;
@@ -365,6 +369,8 @@ class BackupService {
         'name': package.name,
         'description': package.description,
         'createdAt': package.createdAt.toUtc().toIso8601String(),
+        if (package.lastOpenedAt != null)
+          'lastOpenedAt': package.lastOpenedAt!.toUtc().toIso8601String(),
         // Device-local image paths are intentionally omitted (not portable).
         'words': words.map((w) => w.toBackupMap()).toList(),
       });
@@ -450,6 +456,10 @@ class BackupService {
 
       final description = (pkg['description'] as String?) ?? '';
       final createdAt = _parseDate(pkg['createdAt'], 'package "$name" createdAt');
+      final lastOpenedRaw = pkg['lastOpenedAt'];
+      final DateTime? lastOpenedAt = lastOpenedRaw == null
+          ? null
+          : _parseDate(lastOpenedRaw, 'package "$name" lastOpenedAt');
 
       final wordsRaw = pkg['words'];
       if (wordsRaw is! List) {
@@ -498,6 +508,7 @@ class BackupService {
           name: name,
           description: description,
           createdAt: createdAt,
+          lastOpenedAt: lastOpenedAt,
           words: words,
         ),
       );
