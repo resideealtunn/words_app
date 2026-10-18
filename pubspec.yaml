@@ -38,9 +38,12 @@ dependencies:
   sqflite: ^2.3.0
   path: ^1.8.3
   image_picker: ^1.0.7
-  google_fonts: ^4.0.0
+  google_fonts: ^8.1.0
   path_provider: ^2.1.0
   shared_preferences: ^2.2.2
+  file_picker: ^8.1.7
+  crypto: ^3.0.6
+  share_plus: ^10.1.4
 
 dev_dependencies:
   flutter_test:
@@ -51,8 +54,8 @@ dev_dependencies:
   # activated in the `analysis_options.yaml` file located at the root of your
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
-  flutter_lints: ^2.0.0
-  flutter_launcher_icons: ^0.13.1
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

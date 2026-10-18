@@ -10,6 +10,7 @@ import '../models/word.dart';
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
   static Database? _database;
+  static Future<Database>? _opening;
 
   factory DatabaseHelper() => _instance;
 
@@ -17,80 +18,90 @@ class DatabaseHelper {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
+    // Prevent concurrent openDatabase / restore recursion.
+    _opening ??= _initDatabase();
+    try {
+      _database = await _opening!;
+      return _database!;
+    } catch (e) {
+      _opening = null;
+      rethrow;
+    }
   }
 
   Future<Database> _initDatabase() async {
-    // Get application documents directory (persistent storage)
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
     String path = join(documentsDirectory.path, 'words_database.db');
-    
+
     print('Database path: $path');
     print('Database exists: ${await File(path).exists()}');
-    
-    // Ensure directory exists
+
     if (!await documentsDirectory.exists()) {
       await documentsDirectory.create(recursive: true);
       print('Created documents directory');
     }
-    
-    // Check if database needs to be restored
-    await _checkAndRestoreDatabase(path);
-    
-    return await openDatabase(
+
+    // Only copy from backup files — never call `database` getter here.
+    await _tryRestoreFromBackupFiles(path);
+
+    final db = await openDatabase(
       path,
-      version: 2,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
-      onOpen: (db) async {
-        await _verifyDatabaseIntegrity(db);
-      },
     );
+
+    await _verifyDatabaseIntegrity(db);
+    // If DB is empty but SharedPreferences still has data, restore into this handle.
+    await _restoreFromSharedPreferences(db);
+
+    return db;
   }
 
   Future<void> _onCreate(Database db, int version) async {
     print('Creating database with version: $version');
-    
-    // Packages table
+
     await db.execute('''
       CREATE TABLE packages(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         description TEXT NOT NULL,
         createdAt INTEGER NOT NULL,
+        lastOpenedAt INTEGER,
         wordCount INTEGER DEFAULT 0
       )
     ''');
     print('Packages table created');
 
-    // Words table
     await db.execute('''
       CREATE TABLE words(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         packageId INTEGER NOT NULL,
         englishWord TEXT NOT NULL,
         turkishMeaning TEXT NOT NULL,
+        partOfSpeech TEXT,
         description TEXT,
         imagePath TEXT,
         exampleSentence TEXT,
+        exampleSentenceTr TEXT,
+        synonyms TEXT,
+        antonyms TEXT,
+        otherForms TEXT,
         createdAt INTEGER NOT NULL,
         isLearned INTEGER DEFAULT 0,
+        studyLater INTEGER DEFAULT 0,
         FOREIGN KEY (packageId) REFERENCES packages (id) ON DELETE CASCADE
       )
     ''');
     print('Words table created');
-    
-    // Initial backup after creation
-    await backupToAllLocations();
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     print('Upgrading database from version $oldVersion to $newVersion');
-    
+
     if (oldVersion < 2) {
       await db.execute('''
-        CREATE TABLE words(
+        CREATE TABLE IF NOT EXISTS words(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           packageId INTEGER NOT NULL,
           englishWord TEXT NOT NULL,
@@ -105,79 +116,77 @@ class DatabaseHelper {
       ''');
       print('Words table created during upgrade');
     }
-    
-    // Backup after upgrade
-    await backupToAllLocations();
+
+    if (oldVersion < 3) {
+      await _addColumnIfMissing(db, 'words', 'partOfSpeech', 'TEXT');
+      await _addColumnIfMissing(db, 'words', 'exampleSentenceTr', 'TEXT');
+      await _addColumnIfMissing(db, 'words', 'synonyms', 'TEXT');
+      await _addColumnIfMissing(db, 'words', 'antonyms', 'TEXT');
+      await _addColumnIfMissing(db, 'words', 'otherForms', 'TEXT');
+      await _addColumnIfMissing(db, 'words', 'studyLater', 'INTEGER DEFAULT 0');
+      print('Words table upgraded to rich vocabulary schema');
+    }
+
+    if (oldVersion < 4) {
+      await _addColumnIfMissing(db, 'packages', 'lastOpenedAt', 'INTEGER');
+      print('Packages table upgraded with lastOpenedAt');
+    }
   }
 
-  // Database integrity verification
+  Future<void> _addColumnIfMissing(
+    Database db,
+    String table,
+    String column,
+    String type,
+  ) async {
+    final info = await db.rawQuery('PRAGMA table_info($table)');
+    final exists = info.any((row) => row['name'] == column);
+    if (!exists) {
+      await db.execute('ALTER TABLE $table ADD COLUMN $column $type');
+    }
+  }
+
   Future<void> _verifyDatabaseIntegrity(Database db) async {
     try {
-      // Check if tables exist and have proper structure
-      final tables = await db.rawQuery("SELECT name FROM sqlite_master WHERE type='table'");
+      final tables =
+          await db.rawQuery("SELECT name FROM sqlite_master WHERE type='table'");
       final tableNames = tables.map((table) => table['name'] as String).toList();
-      
+
       if (!tableNames.contains('packages') || !tableNames.contains('words')) {
-        print('Database tables missing, attempting restore...');
-        await _attemptDatabaseRestore();
+        print('Database tables missing — recreating schema');
+        await _onCreate(db, 4);
       }
-      
-      // Test basic queries
+
       await db.query('packages', limit: 1);
       await db.query('words', limit: 1);
-      
       print('Database integrity verified');
     } catch (e) {
       print('Database integrity check failed: $e');
-      await _attemptDatabaseRestore();
     }
   }
 
-  // Auto restore mechanism
-  Future<void> _checkAndRestoreDatabase(String mainDbPath) async {
+  /// File-only restore. Safe during init (does not touch `database` getter).
+  Future<bool> _tryRestoreFromBackupFiles(String mainDbPath) async {
     try {
-      File mainDb = File(mainDbPath);
-      
-      // If main database doesn't exist or is corrupted, try to restore
-      if (!await mainDb.exists() || await mainDb.length() == 0) {
-        print('Main database missing or empty, attempting restore...');
-        await _attemptDatabaseRestore();
+      final mainDb = File(mainDbPath);
+      if (await mainDb.exists() && await mainDb.length() > 0) {
+        return false;
       }
-    } catch (e) {
-      print('Error checking database: $e');
-      await _attemptDatabaseRestore();
-    }
-  }
 
-  Future<void> _attemptDatabaseRestore() async {
-    try {
-      // Try to restore from various backup locations
-      List<String> backupSources = await _getBackupPaths();
-      
-      for (String backupPath in backupSources) {
-        File backupFile = File(backupPath);
+      print('Main database missing or empty, looking for file backups...');
+      for (final backupPath in await _getBackupPaths()) {
+        final backupFile = File(backupPath);
         if (await backupFile.exists() && await backupFile.length() > 0) {
-          Directory documentsDirectory = await getApplicationDocumentsDirectory();
-          String mainDbPath = join(documentsDirectory.path, 'words_database.db');
-          
           await backupFile.copy(mainDbPath);
           print('Database restored from: $backupPath');
-          
-          // Verify restored database
-          Database testDb = await openDatabase(mainDbPath, readOnly: true);
-          await testDb.query('packages', limit: 1);
-          await testDb.close();
-          
-          print('Restored database verified successfully');
-          return;
+          return true;
         }
       }
-      
-      // Try to restore from SharedPreferences backup
-      await _restoreFromSharedPreferences();
-      
+      print('No file backup found — a new database will be created');
+      return false;
     } catch (e) {
-      print('Database restore failed: $e');
+      print('File restore failed: $e');
+      return false;
     }
   }
 
@@ -206,44 +215,81 @@ class DatabaseHelper {
 
   // Package operations
   Future<int> insertPackage(Package package) async {
-    final db = await database;
-    final packageId = await db.insert('packages', package.toMap());
-    
-    // Auto backup after important operations
-    await backupToAllLocations();
+    final packageId = await insertPackageWithoutBackup(package);
     await _backupToSharedPreferences();
-    
     return packageId;
+  }
+
+  /// Bulk import helper — skips per-row local backups.
+  Future<int> insertPackageWithoutBackup(Package package) async {
+    final db = await database;
+    final map = package.toMap()..remove('id');
+    return db.insert('packages', map);
   }
 
   Future<List<Package>> getAllPackages() async {
     final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query('packages');
-    final packages = List.generate(maps.length, (i) => Package.fromMap(maps[i]));
-    
-    // Update word counts for all packages
-    for (final package in packages) {
-      if (package.id != null) {
-        await _updatePackageWordCount(package.id!);
-      }
-    }
-    
-    // Return updated packages
-    final updatedMaps = await db.query('packages');
-    return List.generate(updatedMaps.length, (i) => Package.fromMap(updatedMaps[i]));
+    // Live word / learned counts; caller chooses sort order.
+    final maps = await db.rawQuery('''
+      SELECT
+        p.id,
+        p.name,
+        p.description,
+        p.createdAt,
+        p.lastOpenedAt,
+        COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id), 0) AS wordCount,
+        COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id AND w.isLearned = 1), 0) AS learnedCount
+      FROM packages p
+    ''');
+    final packages = maps.map(Package.fromMap).toList();
+    packages.sort(comparePackagesByDay);
+    return packages;
   }
 
   Future<Package?> getPackage(int id) async {
     final db = await database;
-    final List<Map<String, dynamic>> maps = await db.query(
-      'packages',
-      where: 'id = ?',
-      whereArgs: [id],
+    final maps = await db.rawQuery(
+      '''
+      SELECT
+        p.id,
+        p.name,
+        p.description,
+        p.createdAt,
+        p.lastOpenedAt,
+        COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id), 0) AS wordCount,
+        COALESCE((SELECT COUNT(*) FROM words w WHERE w.packageId = p.id AND w.isLearned = 1), 0) AS learnedCount
+      FROM packages p
+      WHERE p.id = ?
+      ''',
+      [id],
     );
-    if (maps.isNotEmpty) {
-      return Package.fromMap(maps.first);
-    }
-    return null;
+    if (maps.isEmpty) return null;
+    return Package.fromMap(maps.first);
+  }
+
+  /// Marks a package as opened now (for "Recently opened" sort).
+  Future<void> touchPackageOpened(int packageId) async {
+    final db = await database;
+    await db.update(
+      'packages',
+      {'lastOpenedAt': DateTime.now().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [packageId],
+    );
+  }
+
+  Future<void> setWordLearned(int wordId, bool learned) async {
+    final db = await database;
+    await db.update(
+      'words',
+      {
+        'isLearned': learned ? 1 : 0,
+        if (learned) 'studyLater': 0,
+      },
+      where: 'id = ?',
+      whereArgs: [wordId],
+    );
+    await _backupToSharedPreferences();
   }
 
   Future<int> updatePackage(Package package) async {
@@ -254,11 +300,7 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [package.id],
     );
-    
-    // Backup after update
-    await backupToAllLocations();
     await _backupToSharedPreferences();
-    
     return result;
   }
 
@@ -269,29 +311,55 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [id],
     );
-    
-    // Backup after deletion
-    await backupToAllLocations();
     await _backupToSharedPreferences();
-    
     return result;
   }
 
   // Word operations
   Future<int> insertWord(Word word) async {
+    final wordId = await insertWordWithoutBackup(word);
+    await _backupToSharedPreferences();
+    return wordId;
+  }
+
+  /// Bulk import helper — skips per-row local backups.
+  Future<int> insertWordWithoutBackup(Word word) async {
     final db = await database;
-    print('Inserting word: ${word.englishWord}');
-    final wordId = await db.insert('words', word.toMap());
-    print('Word inserted with ID: $wordId');
-    
-    // Update package word count
+    final map = word.toMap()..remove('id');
+    final wordId = await db.insert('words', map);
     await _updatePackageWordCount(word.packageId);
-    
-    // Auto backup after important operations
+    return wordId;
+  }
+
+  Future<int> updateWordWithoutBackup(Word word) async {
+    final db = await database;
+    final result = await db.update(
+      'words',
+      word.toMap(),
+      where: 'id = ?',
+      whereArgs: [word.id],
+    );
+    await _updatePackageWordCount(word.packageId);
+    return result;
+  }
+
+  /// Wipe all packages and words (used by Replace All import).
+  Future<void> clearAllData() async {
+    final db = await database;
+    await db.delete('words');
+    await db.delete('packages');
+  }
+
+  /// Refresh counts and write local sandbox backups once after a bulk import.
+  Future<void> finalizeBulkChange() async {
+    final packages = await getAllPackages();
+    for (final package in packages) {
+      if (package.id != null) {
+        await _updatePackageWordCount(package.id!);
+      }
+    }
     await backupToAllLocations();
     await _backupToSharedPreferences();
-    
-    return wordId;
   }
 
   Future<List<Word>> getWordsByPackage(int packageId) async {
@@ -328,17 +396,14 @@ class DatabaseHelper {
 
   Future<int> updateWord(Word word) async {
     final db = await database;
+    final map = word.toMap();
     final result = await db.update(
       'words',
-      word.toMap(),
+      map,
       where: 'id = ?',
       whereArgs: [word.id],
     );
-    
-    // Backup after update
-    await backupToAllLocations();
     await _backupToSharedPreferences();
-    
     return result;
   }
 
@@ -350,16 +415,28 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [id],
     );
-    
+
     if (word != null) {
       await _updatePackageWordCount(word.packageId);
     }
-    
-    // Backup after deletion
-    await backupToAllLocations();
     await _backupToSharedPreferences();
-    
     return result;
+  }
+
+  Future<List<String>> getDistinctPartsOfSpeech({int? packageId}) async {
+    final db = await database;
+    final rows = packageId == null
+        ? await db.rawQuery(
+            "SELECT DISTINCT partOfSpeech FROM words WHERE partOfSpeech IS NOT NULL AND partOfSpeech != ''",
+          )
+        : await db.rawQuery(
+            "SELECT DISTINCT partOfSpeech FROM words WHERE packageId = ? AND partOfSpeech IS NOT NULL AND partOfSpeech != ''",
+            [packageId],
+          );
+    return rows
+        .map((r) => (r['partOfSpeech'] as String?)?.trim() ?? '')
+        .where((s) => s.isNotEmpty)
+        .toList();
   }
 
   Future<int> getWordCountByPackage(int packageId) async {
@@ -369,6 +446,40 @@ class DatabaseHelper {
       [packageId],
     );
     return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  Future<List<Word>> getStudyLaterWords() async {
+    final db = await database;
+    final maps = await db.query(
+      'words',
+      where: 'studyLater = ?',
+      whereArgs: [1],
+      orderBy: 'createdAt DESC',
+    );
+    return maps.map(Word.fromMap).toList();
+  }
+
+  Future<void> setStudyLater(int wordId, bool value) async {
+    final db = await database;
+    await db.update(
+      'words',
+      {'studyLater': value ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [wordId],
+    );
+    await _backupToSharedPreferences();
+  }
+
+  /// Mark as learned and remove from the study-later list.
+  Future<void> markLearnedFromStudyList(int wordId) async {
+    final db = await database;
+    await db.update(
+      'words',
+      {'isLearned': 1, 'studyLater': 0},
+      where: 'id = ?',
+      whereArgs: [wordId],
+    );
+    await _backupToSharedPreferences();
   }
 
   Future<void> _updatePackageWordCount(int packageId) async {
@@ -466,70 +577,73 @@ class DatabaseHelper {
     }
   }
 
-  // SharedPreferences backup for critical data
   Future<void> _backupToSharedPreferences() async {
     try {
-      final db = await database;
+      final db = _database;
+      if (db == null) return;
+
       final prefs = await SharedPreferences.getInstance();
-      
-      // Backup packages
       final packageMaps = await db.query('packages');
-      final packagesJson = jsonEncode(packageMaps);
-      await prefs.setString('backup_packages', packagesJson);
-      
-      // Backup words (limited to recent ones to avoid size issues)
-      final wordMaps = await db.query('words', orderBy: 'createdAt DESC', limit: 1000);
-      final wordsJson = jsonEncode(wordMaps);
-      await prefs.setString('backup_words', wordsJson);
-      
-      // Backup timestamp
-      await prefs.setInt('backup_timestamp', DateTime.now().millisecondsSinceEpoch);
-      
+      await prefs.setString('backup_packages', jsonEncode(packageMaps));
+
+      final wordMaps = await db.query('words', orderBy: 'createdAt DESC');
+      await prefs.setString('backup_words', jsonEncode(wordMaps));
+      await prefs.setInt(
+          'backup_timestamp', DateTime.now().millisecondsSinceEpoch);
+
       print('Critical data backed up to SharedPreferences');
     } catch (e) {
       print('Error backing up to SharedPreferences: $e');
     }
   }
 
-  Future<void> _restoreFromSharedPreferences() async {
+  /// Restores into an already-open [db]. Never calls the `database` getter.
+  Future<void> _restoreFromSharedPreferences(Database db) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      
       final packagesJson = prefs.getString('backup_packages');
       final wordsJson = prefs.getString('backup_words');
-      
+
       if (packagesJson == null || wordsJson == null) {
         print('No SharedPreferences backup found');
         return;
       }
-      
-      final db = await database;
-      
-      // Restore packages
-      final packageMaps = List<Map<String, dynamic>>.from(jsonDecode(packagesJson));
+
+      final existing = await db.query('packages', limit: 1);
+      if (existing.isNotEmpty) {
+        // Don't overwrite a working database on every launch.
+        return;
+      }
+
+      final packageMaps =
+          List<Map<String, dynamic>>.from(jsonDecode(packagesJson));
       for (final packageMap in packageMaps) {
         try {
-          await db.insert('packages', packageMap, conflictAlgorithm: ConflictAlgorithm.replace);
+          await db.insert(
+            'packages',
+            packageMap,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
         } catch (e) {
           print('Error restoring package: $e');
         }
       }
-      
-      // Restore words
+
       final wordMaps = List<Map<String, dynamic>>.from(jsonDecode(wordsJson));
       for (final wordMap in wordMaps) {
         try {
-          await db.insert('words', wordMap, conflictAlgorithm: ConflictAlgorithm.replace);
+          await db.insert(
+            'words',
+            wordMap,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
         } catch (e) {
           print('Error restoring word: $e');
         }
       }
-      
+
       print('Data restored from SharedPreferences backup');
-      
-      // Create new backups after restoration
       await backupToAllLocations();
-      
     } catch (e) {
       print('Error restoring from SharedPreferences: $e');
     }
@@ -551,16 +665,18 @@ class DatabaseHelper {
     }
   }
 
-  // Manual restore from any backup location
   Future<bool> manualRestore() async {
     try {
-      await _attemptDatabaseRestore();
-      
-      // Reinitialize database
       await _database?.close();
       _database = null;
-      _database = await _initDatabase();
-      
+      _opening = null;
+
+      final documentsDirectory = await getApplicationDocumentsDirectory();
+      final mainDbPath = join(documentsDirectory.path, 'words_database.db');
+      await _tryRestoreFromBackupFiles(mainDbPath);
+
+      final db = await database;
+      await _restoreFromSharedPreferences(db);
       return true;
     } catch (e) {
       print('Manual restore failed: $e');

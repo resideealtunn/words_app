@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/package.dart';
 import '../database/database_helper.dart';
+import '../services/backup_service.dart';
 import '../widgets/add_package_dialog.dart';
 import 'package_options_page.dart';
+import 'study_later_page.dart';
 
 class PackagesPage extends StatefulWidget {
   const PackagesPage({super.key});
@@ -12,22 +15,54 @@ class PackagesPage extends StatefulWidget {
 }
 
 class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver {
+  static const _sortPrefKey = 'packages_sort_mode';
+
   final DatabaseHelper _databaseHelper = DatabaseHelper();
+  final BackupService _backupService = BackupService();
+  final TextEditingController _searchController = TextEditingController();
+
   List<Package> _packages = [];
   bool _isLoading = true;
+  bool _isBusy = false;
+  PackageSort _sort = PackageSort.dayOrder;
+  String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _searchController.addListener(() {
+      setState(() => _searchQuery = _searchController.text);
+    });
+    _restoreSortPreference();
     _loadPackages();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _searchController.dispose();
     super.dispose();
   }
+
+  Future<void> _restoreSortPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = PackageSortLabel.fromStorage(prefs.getString(_sortPrefKey));
+    if (!mounted) return;
+    setState(() => _sort = stored);
+  }
+
+  Future<void> _setSort(PackageSort sort) async {
+    setState(() => _sort = sort);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_sortPrefKey, sort.name);
+  }
+
+  List<Package> get _visiblePackages => filterAndSortPackages(
+        _packages,
+        query: _searchQuery,
+        sort: _sort,
+      );
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -138,6 +173,202 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
           ),
         );
       }
+    }
+  }
+
+  Future<void> _exportBackup() async {
+    if (_isBusy) return;
+    setState(() => _isBusy = true);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Color(0xFF8DC71D)),
+            SizedBox(width: 16),
+            Expanded(child: Text('Preparing backup file...')),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final summary = await _backupService.exportToUserLocation();
+      if (mounted) Navigator.of(context).pop();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Exported ${summary.packageCount} packages, '
+            '${summary.wordCount} words.\n'
+            'Keep this .json file outside the app (e.g. Downloads).',
+          ),
+          backgroundColor: const Color(0xFF8DC71D),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } on BackupValidationException catch (e) {
+      if (mounted) Navigator.of(context).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message),
+          backgroundColor: Colors.orange[800],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } catch (e) {
+      if (mounted) Navigator.of(context).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Export failed: $e'),
+          backgroundColor: Colors.red[400],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  Future<void> _showImportDialog() async {
+    if (_isBusy) return;
+
+    final mode = await showDialog<ImportMode>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.file_upload, color: Color(0xFF8DC71D)),
+            SizedBox(width: 8),
+            Text('Import Backup'),
+          ],
+        ),
+        content: const Text(
+          'Choose how to apply the backup file.\n\n'
+          '• Merge: keep existing data, add missing packages/words\n'
+          '• Replace all: delete current data, then import\n\n'
+          'The file is checked with a checksum before writing.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(ImportMode.merge),
+            child: const Text('Merge'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(ImportMode.replaceAll),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Replace all'),
+          ),
+        ],
+      ),
+    );
+
+    if (mode == null) return;
+
+    if (mode == ImportMode.replaceAll) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Replace all data?'),
+          content: const Text(
+            'This permanently deletes all packages and words on this device, '
+            'then loads the backup. This cannot be undone.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete & import'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    setState(() => _isBusy = true);
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(color: Color(0xFF8DC71D)),
+            SizedBox(width: 16),
+            Expanded(child: Text('Validating and importing...')),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final result = await _backupService.importFromUserPick(mode: mode);
+      if (mounted) Navigator.of(context).pop();
+      await _loadPackages();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            mode == ImportMode.replaceAll
+                ? 'Replaced: ${result.packagesCreated} packages, '
+                    '${result.wordsAdded} words '
+                    '(learned/study-later marks restored).'
+                : 'Merged: ${result.wordsAdded} added, '
+                    '${result.wordsUpdated} updated '
+                    '(marks & fields kept), '
+                    '${result.exportedWordCount} in file.',
+          ),
+          backgroundColor: const Color(0xFF8DC71D),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } on BackupValidationException catch (e) {
+      if (mounted) Navigator.of(context).pop();
+      if (!mounted) return;
+      if (e.message == 'Import cancelled.') return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message),
+          backgroundColor: Colors.orange[800],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } catch (e) {
+      if (mounted) Navigator.of(context).pop();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Import failed: $e'),
+          backgroundColor: Colors.red[400],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isBusy = false);
     }
   }
 
@@ -376,6 +607,15 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
         elevation: 0,
         actions: [
           IconButton(
+            icon: const Icon(Icons.bookmark),
+            tooltip: 'Study later',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const StudyLaterPage()),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadPackages,
             tooltip: 'Refresh packages',
@@ -383,13 +623,38 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (value) async {
-              if (value == 'restore') {
+              if (value == 'export') {
+                await _exportBackup();
+              } else if (value == 'import') {
+                await _showImportDialog();
+              } else if (value == 'restore') {
                 await _showRestoreDialog();
               } else if (value == 'backup_info') {
                 await _showBackupInfo();
               }
             },
             itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'export',
+                child: Row(
+                  children: [
+                    Icon(Icons.file_download, color: Color(0xFF8DC71D)),
+                    SizedBox(width: 8),
+                    Text('Export backup'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'import',
+                child: Row(
+                  children: [
+                    Icon(Icons.file_upload, color: Color(0xFF8DC71D)),
+                    SizedBox(width: 8),
+                    Text('Import backup'),
+                  ],
+                ),
+              ),
+              const PopupMenuDivider(),
               const PopupMenuItem(
                 value: 'restore',
                 child: Row(
@@ -421,227 +686,29 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
               ),
             )
           : _packages.isEmpty
-              ? Container(
-                  padding: const EdgeInsets.all(32),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(24),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF8DC71D).withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.folder_open,
-                          size: 64,
-                          color: Color(0xFF8DC71D),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      Text(
-                        'No packages yet',
-                        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                          color: Colors.grey[700],
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Create your first word package to start learning',
-                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: Colors.grey[600],
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
-                )
-              : Container(
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Color(0xFF8DC71D),
-                        Colors.white,
-                      ],
-                      stops: [0.0, 0.3],
-                    ),
-                  ),
-                  child: ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _packages.length,
-                    itemBuilder: (context, index) {
-                      final package = _packages[index];
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 16),
-                        child: Card(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(16),
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  Colors.white,
-                                  const Color(0xFF8DC71D).withOpacity(0.05),
-                                ],
-                              ),
-                            ),
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.all(16),
-                              leading: Container(
-                                width: 56,
-                                height: 56,
-                                decoration: BoxDecoration(
-                                  gradient: const LinearGradient(
-                                    colors: [Color(0xFF8DC71D), Color(0xFF7AB51A)],
-                                    begin: Alignment.topLeft,
-                                    end: Alignment.bottomRight,
-                                  ),
-                                  borderRadius: BorderRadius.circular(16),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: const Color(0xFF8DC71D).withOpacity(0.3),
-                                      blurRadius: 8,
-                                      offset: const Offset(0, 4),
-                                    ),
-                                  ],
-                                ),
-                                child: Center(
-                                  child: Text(
-                                    package.name[0].toUpperCase(),
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 20,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              title: Text(
-                                package.name,
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    package.description,
-                                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                      color: Colors.grey[700],
-                                    ),
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Row(
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF8DC71D).withOpacity(0.1),
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              Icons.access_time,
-                                              size: 14,
-                                              color: const Color(0xFF8DC71D),
-                                            ),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              _formatDate(package.createdAt),
-                                              style: TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w500,
-                                                color: const Color(0xFF8DC71D),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black.withOpacity(0.1),
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              Icons.text_fields,
-                                              size: 14,
-                                              color: Colors.black87,
-                                            ),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              '${package.wordCount} words',
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w500,
-                                                color: Colors.black87,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                              trailing: PopupMenuButton<String>(
-                                icon: Icon(
-                                  Icons.more_vert,
-                                  color: Colors.grey[600],
-                                ),
-                                onSelected: (value) {
-                                  if (value == 'delete') {
-                                    _deletePackage(package);
-                                  }
-                                },
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    child: Row(
-                                      children: [
-                                        Icon(Icons.delete, color: Colors.red[400]),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          'Delete',
-                                          style: TextStyle(color: Colors.red[400]),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                                                                                    onTap: () async {
-                                await Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (context) => PackageOptionsPage(package: package),
-                                  ),
-                                );
-                                // Refresh packages when returning from options page
-                                _loadPackages();
+              ? _buildEmptyState()
+              : Column(
+                  children: [
+                    _buildSearchAndSortBar(),
+                    _buildSortHint(),
+                    Expanded(
+                      child: _visiblePackages.isEmpty
+                          ? _buildNoSearchResults()
+                          : ListView.builder(
+                              padding:
+                                  const EdgeInsets.fromLTRB(16, 0, 16, 96),
+                              itemCount: _visiblePackages.length + 1,
+                              itemBuilder: (context, index) {
+                                if (index == 0) {
+                                  return _buildOverallProgressCard();
+                                }
+                                final package =
+                                    _visiblePackages[index - 1];
+                                return _buildPackageCard(context, package);
                               },
                             ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                    ),
+                  ],
                 ),
       floatingActionButton: Container(
         decoration: BoxDecoration(
@@ -663,18 +730,373 @@ class _PackagesPageState extends State<PackagesPage> with WidgetsBindingObserver
     );
   }
 
-  String _formatDate(DateTime date) {
-    final now = DateTime.now();
-    final difference = now.difference(date);
+  int get _totalWords =>
+      _packages.fold(0, (sum, p) => sum + p.wordCount);
 
-    if (difference.inDays == 0) {
-      return 'Today';
-    } else if (difference.inDays == 1) {
-      return 'Yesterday';
-    } else if (difference.inDays < 7) {
-      return '${difference.inDays} days ago';
-    } else {
-      return '${date.day}/${date.month}/${date.year}';
-    }
+  int get _totalLearned =>
+      _packages.fold(0, (sum, p) => sum + p.learnedCount);
+
+  double get _overallPercent =>
+      _totalWords == 0 ? 0 : (_totalLearned / _totalWords) * 100;
+
+  Widget _buildSearchAndSortBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: 'Search packages by name…',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () => _searchController.clear(),
+                      ),
+                filled: true,
+                fillColor: Colors.white,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 0,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey[300]!),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey[300]!),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(
+                    color: Color(0xFF8DC71D),
+                    width: 1.5,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Material(
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: Colors.grey[300]!),
+            ),
+            child: PopupMenuButton<PackageSort>(
+              tooltip: 'Sort packages',
+              initialValue: _sort,
+              onSelected: _setSort,
+              itemBuilder: (context) => PackageSort.values
+                  .map(
+                    (s) => CheckedPopupMenuItem<PackageSort>(
+                      value: s,
+                      checked: s == _sort,
+                      child: Text(s.label),
+                    ),
+                  )
+                  .toList(),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.sort, color: Colors.grey[800]),
+                    const SizedBox(width: 4),
+                    Icon(Icons.arrow_drop_down, color: Colors.grey[700]),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSortHint() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          'Sorted by: ${_sort.label}'
+          '${_searchQuery.trim().isEmpty ? '' : ' · ${_visiblePackages.length} shown'}',
+          style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SizedBox(
+          width: constraints.maxWidth,
+          height: constraints.maxHeight,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(32, 32, 32, 96),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color:
+                            const Color(0xFF8DC71D).withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.folder_open,
+                        size: 64,
+                        color: Color(0xFF8DC71D),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'No packages yet',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineMedium
+                          ?.copyWith(
+                            color: Colors.grey[700],
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Create your first word package to start learning',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodyLarge
+                          ?.copyWith(color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildNoSearchResults() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off, size: 56, color: Colors.grey[400]),
+            const SizedBox(height: 12),
+            Text(
+              'No packages match “$_searchQuery”',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey[700],
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => _searchController.clear(),
+              child: const Text('Clear search'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOverallProgressCard() {
+    final completedDays =
+        _packages.where((p) => p.isComplete).length;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.insights, color: Color(0xFF8DC71D)),
+                const SizedBox(width: 8),
+                Text(
+                  'Study progress',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: _totalWords == 0 ? 0 : _totalLearned / _totalWords,
+                minHeight: 10,
+                backgroundColor: Colors.grey[200],
+                color: const Color(0xFF8DC71D),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '${_overallPercent.toStringAsFixed(0)}% complete · '
+              '$_totalLearned / $_totalWords words learned · '
+              '$completedDays / ${_packages.length} days done',
+              style: TextStyle(color: Colors.grey[700], fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPackageCard(BuildContext context, Package package) {
+    final percent = package.completionPercent;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () async {
+          if (package.id != null) {
+            await _databaseHelper.touchPackageOpened(package.id!);
+          }
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => PackageOptionsPage(package: package),
+            ),
+          );
+          _loadPackages();
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: package.isComplete
+                      ? const Color(0xFF8DC71D)
+                      : const Color(0xFF8DC71D).withValues(alpha: 0.85),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Center(
+                  child: package.isComplete
+                      ? const Icon(Icons.check, color: Colors.white, size: 28)
+                      : Text(
+                          _dayBadge(package.name),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            package.name,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleLarge
+                                ?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          icon: Icon(Icons.more_vert, color: Colors.grey[600]),
+                          onSelected: (value) {
+                            if (value == 'delete') {
+                              _deletePackage(package);
+                            }
+                          },
+                          itemBuilder: (context) => [
+                            PopupMenuItem(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.delete, color: Colors.red[400]),
+                                  const SizedBox(width: 8),
+                                  Text('Delete',
+                                      style: TextStyle(color: Colors.red[400])),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Text(
+                      '${package.learnedCount} / ${package.wordCount} learned',
+                      style: TextStyle(
+                        color: Colors.grey[700],
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: LinearProgressIndicator(
+                        value: package.wordCount == 0
+                            ? 0
+                            : package.learnedCount / package.wordCount,
+                        minHeight: 8,
+                        backgroundColor: Colors.grey[200],
+                        color: package.isComplete
+                            ? Colors.green
+                            : const Color(0xFF8DC71D),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${percent.toStringAsFixed(0)}% complete',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _dayBadge(String name) {
+    final match =
+        RegExp(r'^day\s+(\d+)$', caseSensitive: false).firstMatch(name.trim());
+    if (match != null) return match.group(1)!;
+    if (name.isEmpty) return '?';
+    return name[0].toUpperCase();
   }
 } 

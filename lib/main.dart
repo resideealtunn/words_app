@@ -1,48 +1,30 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'pages/packages_page.dart';
+import 'package:flutter/services.dart';
+
 import 'database/database_helper.dart';
+import 'pages/packages_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Initialize database and ensure data integrity
+  // Crisp UI on high-DPI tablets (prefer Skia via AndroidManifest Impeller=false).
+  await SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
   await _initializeApp();
-  
   runApp(const MyApp());
 }
 
-// App initialization with database safety checks
 Future<void> _initializeApp() async {
   try {
-    print('Initializing app...');
-    
-    // Initialize database helper
     final dbHelper = DatabaseHelper();
-    
-    // Force database initialization and integrity check
     await dbHelper.database;
-    
-    // Get backup information for logging
-    final backupInfo = await dbHelper.getBackupInfo();
-    print('Backup information: $backupInfo');
-    
-    print('App initialization completed successfully');
   } catch (e) {
-    print('Error during app initialization: $e');
-    
-    // Try manual restore if initialization fails
     try {
-      final dbHelper = DatabaseHelper();
-      final restored = await dbHelper.manualRestore();
-      if (restored) {
-        print('Manual restore successful');
-      } else {
-        print('Manual restore failed');
-      }
-    } catch (restoreError) {
-      print('Manual restore error: $restoreError');
-    }
+      await DatabaseHelper().manualRestore();
+    } catch (_) {}
   }
 }
 
@@ -51,19 +33,24 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const seed = Color(0xFF8DC71D);
+    // System fonts (Roboto on Android) — sharp at all densities, works offline.
+    final base = ThemeData(
+      colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.light),
+      useMaterial3: true,
+      visualDensity: VisualDensity.standard,
+      materialTapTargetSize: MaterialTapTargetSize.padded,
+    );
+
     return MaterialApp(
       title: 'English Words Learning',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF8DC71D),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
+      theme: base.copyWith(
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
           fillColor: Colors.white,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: Colors.grey[300]!),
@@ -74,50 +61,35 @@ class MyApp extends StatelessWidget {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF8DC71D), width: 2),
-          ),
-          labelStyle: GoogleFonts.inter(
-            fontSize: 16,
-            color: Colors.grey[700],
-            fontWeight: FontWeight.w500,
-          ),
-          hintStyle: GoogleFonts.inter(
-            fontSize: 16,
-            color: Colors.grey[500],
-            fontWeight: FontWeight.w400,
-          ),
-          floatingLabelStyle: GoogleFonts.inter(
-            fontSize: 14,
-            color: const Color(0xFF8DC71D),
-            fontWeight: FontWeight.w600,
+            borderSide: const BorderSide(color: seed, width: 2),
           ),
         ),
-        appBarTheme: AppBarTheme(
-          backgroundColor: const Color(0xFF8DC71D),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: seed,
           foregroundColor: Colors.black,
           elevation: 0,
           centerTitle: true,
-          titleTextStyle: GoogleFonts.inter(
+          titleTextStyle: TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.w600,
             color: Colors.black,
           ),
         ),
-        cardTheme: CardTheme(
-          elevation: 4,
-          shadowColor: Colors.black.withOpacity(0.1),
+        cardTheme: CardThemeData(
+          elevation: 3,
+          shadowColor: Colors.black.withValues(alpha: 0.08),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
         ),
         floatingActionButtonTheme: const FloatingActionButtonThemeData(
-          backgroundColor: Color(0xFF8DC71D),
+          backgroundColor: seed,
           foregroundColor: Colors.black,
-          elevation: 8,
+          elevation: 6,
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF8DC71D),
+            backgroundColor: seed,
             foregroundColor: Colors.black,
             elevation: 2,
             shape: RoundedRectangleBorder(
@@ -125,39 +97,19 @@ class MyApp extends StatelessWidget {
             ),
           ),
         ),
-        textTheme: GoogleFonts.interTextTheme().copyWith(
-          headlineLarge: GoogleFonts.inter(
-            fontSize: 28,
-            fontWeight: FontWeight.bold,
-            color: Colors.black,
-          ),
-          headlineMedium: GoogleFonts.inter(
-            fontSize: 24,
-            fontWeight: FontWeight.w600,
-            color: Colors.black,
-          ),
-          titleLarge: GoogleFonts.inter(
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            color: Colors.black,
-          ),
-          titleMedium: GoogleFonts.inter(
-            fontSize: 16,
-            fontWeight: FontWeight.w500,
-            color: Colors.black,
-          ),
-          bodyLarge: GoogleFonts.inter(
-            fontSize: 16,
-            fontWeight: FontWeight.w400,
-            color: Colors.black87,
-          ),
-          bodyMedium: GoogleFonts.inter(
-            fontSize: 14,
-            fontWeight: FontWeight.w400,
-            color: Colors.black87,
-          ),
-        ),
       ),
+      builder: (context, child) {
+        // Keep text readable but avoid extreme OS font scaling breaking layout.
+        final media = MediaQuery.of(context);
+        final clamped = media.textScaler.clamp(
+          minScaleFactor: 0.9,
+          maxScaleFactor: 1.25,
+        );
+        return MediaQuery(
+          data: media.copyWith(textScaler: clamped),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: const PackagesPage(),
     );
   }

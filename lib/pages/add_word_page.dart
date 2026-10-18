@@ -1,9 +1,14 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
+import '../constants/word_types.dart';
+import '../database/database_helper.dart';
 import '../models/package.dart';
 import '../models/word.dart';
-import '../database/database_helper.dart';
+import '../widgets/locale_text_form_field.dart';
+import '../widgets/part_of_speech_picker.dart';
 
 class AddWordPage extends StatefulWidget {
   final Package package;
@@ -20,10 +25,40 @@ class _AddWordPageState extends State<AddWordPage> {
   final _turkishController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _sentenceController = TextEditingController();
+  final _sentenceTrController = TextEditingController();
+  final _synonymsController = TextEditingController();
+  final _antonymsController = TextEditingController();
+  final _otherFormsController = TextEditingController();
   final DatabaseHelper _databaseHelper = DatabaseHelper();
   final ImagePicker _imagePicker = ImagePicker();
   bool _isLoading = false;
   File? _selectedImage;
+  Set<String> _selectedTypes = {};
+  List<String> _extraTypes = [];
+
+  List<String> _parseList(String raw) => raw
+      .split(RegExp(r'[,;\n]'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExtraTypes();
+  }
+
+  Future<void> _loadExtraTypes() async {
+    final raw = await _databaseHelper.getDistinctPartsOfSpeech();
+    final extras = <String>{};
+    for (final r in raw) {
+      for (final t in parseWordTypes(r)) {
+        if (!kStandardWordTypes.contains(t)) extras.add(t);
+      }
+    }
+    if (!mounted) return;
+    setState(() => _extraTypes = extras.toList()..sort());
+  }
 
   @override
   void dispose() {
@@ -31,6 +66,10 @@ class _AddWordPageState extends State<AddWordPage> {
     _turkishController.dispose();
     _descriptionController.dispose();
     _sentenceController.dispose();
+    _sentenceTrController.dispose();
+    _synonymsController.dispose();
+    _antonymsController.dispose();
+    _otherFormsController.dispose();
     super.dispose();
   }
 
@@ -78,6 +117,9 @@ class _AddWordPageState extends State<AddWordPage> {
         packageId: widget.package.id!,
         englishWord: _englishController.text.trim(),
         turkishMeaning: _turkishController.text.trim(),
+        partOfSpeech: _selectedTypes.isEmpty
+            ? null
+            : encodeWordTypes(_selectedTypes),
         description: _descriptionController.text.trim().isEmpty 
             ? null 
             : _descriptionController.text.trim(),
@@ -85,6 +127,12 @@ class _AddWordPageState extends State<AddWordPage> {
         exampleSentence: _sentenceController.text.trim().isEmpty 
             ? null 
             : _sentenceController.text.trim(),
+        exampleSentenceTr: _sentenceTrController.text.trim().isEmpty
+            ? null
+            : _sentenceTrController.text.trim(),
+        synonyms: _parseList(_synonymsController.text),
+        antonyms: _parseList(_antonymsController.text),
+        otherForms: _parseList(_otherFormsController.text),
         createdAt: DateTime.now(),
       );
 
@@ -242,8 +290,9 @@ class _AddWordPageState extends State<AddWordPage> {
                 const SizedBox(height: 16),
                 
                 // English Word
-                TextFormField(
+                LocaleTextFormField.english(
                   controller: _englishController,
+                  textCapitalization: TextCapitalization.words,
                   decoration: InputDecoration(
                     labelText: 'English Word *',
                     hintText: 'Enter English word',
@@ -269,13 +318,13 @@ class _AddWordPageState extends State<AddWordPage> {
                     }
                     return null;
                   },
-                  textCapitalization: TextCapitalization.words,
                 ),
                 const SizedBox(height: 16),
                 
                 // Turkish Meaning
-                TextFormField(
+                LocaleTextFormField.turkish(
                   controller: _turkishController,
+                  textCapitalization: TextCapitalization.words,
                   decoration: InputDecoration(
                     labelText: 'Turkish Meaning *',
                     hintText: 'Enter Turkish meaning',
@@ -301,7 +350,17 @@ class _AddWordPageState extends State<AddWordPage> {
                     }
                     return null;
                   },
-                  textCapitalization: TextCapitalization.words,
+                ),
+                const SizedBox(height: 16),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: PartOfSpeechPicker(
+                      selected: _selectedTypes,
+                      extraTypes: _extraTypes,
+                      onChanged: (next) => setState(() => _selectedTypes = next),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 24),
                 
@@ -318,6 +377,51 @@ class _AddWordPageState extends State<AddWordPage> {
                   'These fields are optional but helpful for learning',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Colors.grey[600],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                LocaleTextFormField.english(
+                  controller: _sentenceController,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Example sentence',
+                    prefixIcon: Icon(Icons.format_quote, color: Color(0xFF8DC71D)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                LocaleTextFormField.turkish(
+                  controller: _sentenceTrController,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Example sentence (TR)',
+                    prefixIcon: Icon(Icons.translate, color: Color(0xFF8DC71D)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                LocaleTextFormField.english(
+                  controller: _synonymsController,
+                  decoration: const InputDecoration(
+                    labelText: 'Synonyms',
+                    hintText: 'comma separated',
+                    prefixIcon: Icon(Icons.sync_alt, color: Color(0xFF8DC71D)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                LocaleTextFormField.english(
+                  controller: _antonymsController,
+                  decoration: const InputDecoration(
+                    labelText: 'Antonyms',
+                    hintText: 'comma separated',
+                    prefixIcon: Icon(Icons.compare_arrows, color: Color(0xFF8DC71D)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                LocaleTextFormField.english(
+                  controller: _otherFormsController,
+                  decoration: const InputDecoration(
+                    labelText: 'Other forms',
+                    hintText: 'Tempting (adj), ...',
+                    prefixIcon: Icon(Icons.account_tree, color: Color(0xFF8DC71D)),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -435,12 +539,14 @@ class _AddWordPageState extends State<AddWordPage> {
                 ),
                 const SizedBox(height: 16),
                 
-                // Description
-                TextFormField(
+                // Description / notes (typically Turkish)
+                LocaleTextFormField.turkish(
                   controller: _descriptionController,
+                  maxLines: 3,
+                  textCapitalization: TextCapitalization.sentences,
                   decoration: InputDecoration(
-                    labelText: 'Description (Optional)',
-                    hintText: 'Add a description or note about the word',
+                    labelText: 'Notes (Optional)',
+                    hintText: 'Add a note about the word',
                     prefixIcon: const Icon(Icons.description, color: Color(0xFF8DC71D)),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -457,35 +563,6 @@ class _AddWordPageState extends State<AddWordPage> {
                     filled: true,
                     fillColor: Colors.white,
                   ),
-                  maxLines: 3,
-                  textCapitalization: TextCapitalization.sentences,
-                ),
-                const SizedBox(height: 16),
-                
-                // Example Sentence
-                TextFormField(
-                  controller: _sentenceController,
-                  decoration: InputDecoration(
-                    labelText: 'Example Sentence (Optional)',
-                    hintText: 'Add an example sentence using this word',
-                    prefixIcon: const Icon(Icons.text_fields, color: Color(0xFF8DC71D)),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey[300]!),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey[300]!),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFF8DC71D), width: 2),
-                    ),
-                    filled: true,
-                    fillColor: Colors.white,
-                  ),
-                  maxLines: 3,
-                  textCapitalization: TextCapitalization.sentences,
                 ),
                 const SizedBox(height: 24),
                 

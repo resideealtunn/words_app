@@ -1,8 +1,14 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
+
+import '../constants/word_types.dart';
+import '../database/database_helper.dart';
 import '../models/package.dart';
 import '../models/word.dart';
-import '../database/database_helper.dart';
+import '../pages/practice_page.dart' show PracticePage;
+import '../widgets/part_of_speech_picker.dart';
+import '../widgets/word_detail_sheet.dart';
 
 enum SortType { alphabetical, newest, random }
 enum LanguageMode { englishToTurkish, turkishToEnglish }
@@ -19,13 +25,15 @@ class ViewListPage extends StatefulWidget {
 class _ViewListPageState extends State<ViewListPage> {
   final DatabaseHelper _databaseHelper = DatabaseHelper();
   final TextEditingController _searchController = TextEditingController();
-  
+
   List<Word> _allWords = [];
   List<Word> _filteredWords = [];
+  List<String> _availableTypes = [];
   bool _isLoading = true;
   SortType _currentSort = SortType.alphabetical;
   LanguageMode _languageMode = LanguageMode.englishToTurkish;
   String _searchQuery = '';
+  String _typeFilter = 'all';
 
   @override
   void initState() {
@@ -46,9 +54,14 @@ class _ViewListPageState extends State<ViewListPage> {
 
     try {
       final words = await _databaseHelper.getWordsByPackage(widget.package.id!);
+      final types = <String>{};
+      for (final w in words) {
+        types.addAll(parseWordTypes(w.partOfSpeech));
+      }
       setState(() {
         _allWords = words;
-        _filteredWords = _sortWords(words);
+        _availableTypes = types.toList()..sort();
+        _applyFilters();
         _isLoading = false;
       });
     } catch (e) {
@@ -79,27 +92,44 @@ class _ViewListPageState extends State<ViewListPage> {
     }
   }
 
+  void _applyFilters() {
+    var list = _allWords.where((word) {
+      if (!wordMatchesTypeFilter(word.partOfSpeech, _typeFilter)) return false;
+      if (_searchQuery.isEmpty) return true;
+      final q = _searchQuery.toLowerCase();
+      return word.englishWord.toLowerCase().contains(q) ||
+          word.turkishMeaning.toLowerCase().contains(q);
+    }).toList();
+    _filteredWords = _sortWords(list);
+  }
+
   void _filterWords(String query) {
     setState(() {
       _searchQuery = query;
-      if (query.isEmpty) {
-        _filteredWords = _sortWords(_allWords);
-      } else {
-        final lowercaseQuery = query.toLowerCase();
-        final filtered = _allWords.where((word) {
-          return word.englishWord.toLowerCase().contains(lowercaseQuery) ||
-                 word.turkishMeaning.toLowerCase().contains(lowercaseQuery);
-        }).toList();
-        _filteredWords = _sortWords(filtered);
-      }
+      _applyFilters();
     });
   }
 
   void _changeSort(SortType sortType) {
     setState(() {
       _currentSort = sortType;
-      _filteredWords = _sortWords(_filteredWords);
+      _applyFilters();
     });
+  }
+
+  void _openPracticeForVisible() {
+    if (_filteredWords.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PracticePage(
+          package: widget.package,
+          initialWords: List<Word>.from(_filteredWords),
+          title: _typeFilter == 'all'
+              ? 'List practice'
+              : (kWordTypeLabels[_typeFilter] ?? _typeFilter),
+        ),
+      ),
+    );
   }
 
   String _getSortTypeText(SortType sortType) {
@@ -122,401 +152,39 @@ class _ViewListPageState extends State<ViewListPage> {
     }
   }
 
-  void _showWordDetailCard(Word word) {
-    showDialog(
+  Future<void> _showWordDetailCard(Word word) async {
+    await showDialog(
       context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          margin: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.grey[900],
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: const Color(0xFF8DC71D),
-              width: 2,
+      builder: (context) => WordDetailSheet(
+        word: word,
+        packageName: widget.package.name,
+        onToggleStudyLater: () async {
+          final adding = !word.studyLater;
+          Navigator.of(context).pop();
+          await _databaseHelper.setStudyLater(word.id!, adding);
+          await _loadWords();
+          if (!mounted) return;
+          ScaffoldMessenger.of(this.context).showSnackBar(
+            SnackBar(
+              content: Text(adding ? 'Added to study later' : 'Removed from study later'),
+              backgroundColor: const Color(0xFF8DC71D),
             ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Header with close button
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF8DC71D).withOpacity(0.1),
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(14),
-                    topRight: Radius.circular(14),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.info,
-                      color: Color(0xFF8DC71D),
-                      size: 24,
-                    ),
-                    const SizedBox(width: 8),
-                    const Text(
-                      'Word Details',
-                      style: TextStyle(
-                        color: Color(0xFF8DC71D),
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(
-                        Icons.close,
-                        color: Color(0xFF8DC71D),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              
-              // Content
-              Flexible(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // English Word
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF8DC71D).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: const Color(0xFF8DC71D).withOpacity(0.3),
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.language,
-                                  color: Colors.grey[400],
-                                  size: 16,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'English',
-                                  style: TextStyle(
-                                    color: Colors.grey[400],
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              word.englishWord,
-                              style: const TextStyle(
-                                color: Color(0xFF8DC71D),
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      
-                      const SizedBox(height: 16),
-                      
-                      // Turkish Meaning
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.red.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: Colors.red.withOpacity(0.3),
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.translate,
-                                  color: Colors.grey[400],
-                                  size: 16,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Turkish',
-                                  style: TextStyle(
-                                    color: Colors.grey[400],
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              word.turkishMeaning,
-                              style: TextStyle(
-                                color: Colors.red[300],
-                                fontSize: 20,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      
-                      // Description if exists
-                      if (word.description != null && word.description!.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: Colors.blue.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.description,
-                                    color: Colors.grey[400],
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Description',
-                                    style: TextStyle(
-                                      color: Colors.grey[400],
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                word.description!,
-                                style: TextStyle(
-                                  color: Colors.blue[300],
-                                  fontSize: 16,
-                                  height: 1.4,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      
-                      // Example Sentence if exists
-                      if (word.exampleSentence != null && word.exampleSentence!.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.purple.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: Colors.purple.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.format_quote,
-                                    color: Colors.grey[400],
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    'Example Sentence',
-                                    style: TextStyle(
-                                      color: Colors.grey[400],
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                '"${word.exampleSentence!}"',
-                                style: TextStyle(
-                                  color: Colors.purple[300],
-                                  fontSize: 16,
-                                  fontStyle: FontStyle.italic,
-                                  height: 1.4,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      
-                      // Image if exists
-                      if (word.imagePath != null) ...[
-                        const SizedBox(height: 16),
-                        Container(
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: Colors.orange.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: Colors.orange.withOpacity(0.1),
-                                  borderRadius: const BorderRadius.only(
-                                    topLeft: Radius.circular(11),
-                                    topRight: Radius.circular(11),
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      Icons.image,
-                                      color: Colors.grey[400],
-                                      size: 16,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Image',
-                                      style: TextStyle(
-                                        color: Colors.grey[400],
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              ClipRRect(
-                                borderRadius: const BorderRadius.only(
-                                  bottomLeft: Radius.circular(11),
-                                  bottomRight: Radius.circular(11),
-                                ),
-                                child: GestureDetector(
-                                  onTap: () => _showFullScreenImage(word.imagePath!),
-                                  child: Container(
-                                    width: double.infinity,
-                                    constraints: const BoxConstraints(
-                                      maxHeight: 200,
-                                    ),
-                                    child: Image.file(
-                                      File(word.imagePath!),
-                                      fit: BoxFit.cover,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      
-                      const SizedBox(height: 16),
-                      
-                      // Date Added
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[800],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.access_time,
-                              color: Colors.grey[400],
-                              size: 16,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              'Added: ${_formatDate(word.createdAt)}',
-                              style: TextStyle(
-                                color: Colors.grey[400],
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+          );
+        },
+        onMarkLearned: () async {
+          Navigator.of(context).pop();
+          await _databaseHelper.markLearnedFromStudyList(word.id!);
+          await _loadWords();
+          if (!mounted) return;
+          ScaffoldMessenger.of(this.context).showSnackBar(
+            SnackBar(
+              content: Text('"${word.englishWord}" marked as learned'),
+              backgroundColor: const Color(0xFF8DC71D),
+            ),
+          );
+        },
       ),
     );
-  }
-
-  void _showFullScreenImage(String imagePath) {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.black,
-        child: Stack(
-          children: [
-            Container(
-              width: double.infinity,
-              height: double.infinity,
-              child: InteractiveViewer(
-                child: Image.file(
-                  File(imagePath),
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-            Positioned(
-              top: 40,
-              right: 20,
-              child: IconButton(
-                onPressed: () => Navigator.of(context).pop(),
-                icon: const Icon(
-                  Icons.close,
-                  color: Colors.white,
-                  size: 30,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year}';
   }
 
   @override
@@ -535,6 +203,23 @@ class _ViewListPageState extends State<ViewListPage> {
           onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Practice visible words',
+            icon: const Icon(Icons.style, color: Color(0xFF8DC71D)),
+            onPressed: _openPracticeForVisible,
+          ),
+          if (_availableTypes.isNotEmpty)
+            PartOfSpeechFilterDropdown(
+              value: _typeFilter,
+              availableTypes: _availableTypes,
+              dark: true,
+              onChanged: (v) {
+                setState(() {
+                  _typeFilter = v ?? 'all';
+                  _applyFilters();
+                });
+              },
+            ),
           // Language Mode Button
           PopupMenuButton<LanguageMode>(
             icon: const Icon(Icons.language, color: Color(0xFF8DC71D)),
@@ -833,6 +518,14 @@ class _ViewListPageState extends State<ViewListPage> {
                                             fit: BoxFit.cover,
                                           ),
                                         ),
+                                      ),
+                                    ],
+                                    if (word.studyLater) ...[
+                                      const SizedBox(width: 6),
+                                      const Icon(
+                                        Icons.bookmark,
+                                        color: Colors.amber,
+                                        size: 18,
                                       ),
                                     ],
                                     // Tap indicator

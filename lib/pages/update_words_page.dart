@@ -1,9 +1,14 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
+import '../constants/word_types.dart';
+import '../database/database_helper.dart';
 import '../models/package.dart';
 import '../models/word.dart';
-import '../database/database_helper.dart';
+import '../widgets/locale_text_form_field.dart';
+import '../widgets/part_of_speech_picker.dart';
 
 class UpdateWordsPage extends StatefulWidget {
   final Package package;
@@ -31,12 +36,37 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
   final _turkishController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _sentenceController = TextEditingController();
+  final _sentenceTrController = TextEditingController();
+  final _synonymsController = TextEditingController();
+  final _antonymsController = TextEditingController();
+  final _otherFormsController = TextEditingController();
   File? _selectedImage;
+  Set<String> _selectedTypes = {};
+  List<String> _extraTypes = [];
+
+  List<String> _parseList(String raw) => raw
+      .split(RegExp(r'[,;\n]'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
 
   @override
   void initState() {
     super.initState();
     _loadWords();
+    _loadExtraTypes();
+  }
+
+  Future<void> _loadExtraTypes() async {
+    final raw = await _databaseHelper.getDistinctPartsOfSpeech();
+    final extras = <String>{};
+    for (final r in raw) {
+      for (final t in parseWordTypes(r)) {
+        if (!kStandardWordTypes.contains(t)) extras.add(t);
+      }
+    }
+    if (!mounted) return;
+    setState(() => _extraTypes = extras.toList()..sort());
   }
 
   @override
@@ -46,6 +76,10 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
     _turkishController.dispose();
     _descriptionController.dispose();
     _sentenceController.dispose();
+    _sentenceTrController.dispose();
+    _synonymsController.dispose();
+    _antonymsController.dispose();
+    _otherFormsController.dispose();
     super.dispose();
   }
 
@@ -100,8 +134,13 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
       // Initialize edit controllers
       _englishController.text = word.englishWord;
       _turkishController.text = word.turkishMeaning;
+      _selectedTypes = parseWordTypes(word.partOfSpeech);
       _descriptionController.text = word.description ?? '';
       _sentenceController.text = word.exampleSentence ?? '';
+      _sentenceTrController.text = word.exampleSentenceTr ?? '';
+      _synonymsController.text = word.synonyms.join(', ');
+      _antonymsController.text = word.antonyms.join(', ');
+      _otherFormsController.text = word.otherForms.join(', ');
       _selectedImage = word.imagePath != null ? File(word.imagePath!) : null;
     });
   }
@@ -151,6 +190,9 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
         packageId: _selectedWord!.packageId,
         englishWord: _englishController.text.trim(),
         turkishMeaning: _turkishController.text.trim(),
+        partOfSpeech: _selectedTypes.isEmpty
+            ? null
+            : encodeWordTypes(_selectedTypes),
         description: _descriptionController.text.trim().isEmpty 
             ? null 
             : _descriptionController.text.trim(),
@@ -158,8 +200,15 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
         exampleSentence: _sentenceController.text.trim().isEmpty 
             ? null 
             : _sentenceController.text.trim(),
+        exampleSentenceTr: _sentenceTrController.text.trim().isEmpty
+            ? null
+            : _sentenceTrController.text.trim(),
+        synonyms: _parseList(_synonymsController.text),
+        antonyms: _parseList(_antonymsController.text),
+        otherForms: _parseList(_otherFormsController.text),
         createdAt: _selectedWord!.createdAt,
         isLearned: _selectedWord!.isLearned,
+        studyLater: _selectedWord!.studyLater,
       );
 
       await _databaseHelper.updateWord(updatedWord);
@@ -433,7 +482,7 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                         const SizedBox(height: 16),
 
                         // English Word
-                        TextFormField(
+                        LocaleTextFormField.english(
                           controller: _englishController,
                           decoration: InputDecoration(
                             labelText: 'English Word *',
@@ -458,7 +507,7 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                         const SizedBox(height: 16),
 
                         // Turkish Meaning
-                        TextFormField(
+                        LocaleTextFormField.turkish(
                           controller: _turkishController,
                           decoration: InputDecoration(
                             labelText: 'Turkish Meaning *',
@@ -478,6 +527,51 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                             ),
                             filled: true,
                             fillColor: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: PartOfSpeechPicker(
+                              selected: _selectedTypes,
+                              extraTypes: _extraTypes,
+                              onChanged: (next) =>
+                                  setState(() => _selectedTypes = next),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        LocaleTextFormField.turkish(
+                          controller: _sentenceTrController,
+                          maxLines: 2,
+                          decoration: const InputDecoration(
+                            labelText: 'Example sentence (TR)',
+                            prefixIcon: Icon(Icons.translate, color: Color(0xFF8DC71D)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        LocaleTextFormField.english(
+                          controller: _synonymsController,
+                          decoration: const InputDecoration(
+                            labelText: 'Synonyms (comma separated)',
+                            prefixIcon: Icon(Icons.sync_alt, color: Color(0xFF8DC71D)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        LocaleTextFormField.english(
+                          controller: _antonymsController,
+                          decoration: const InputDecoration(
+                            labelText: 'Antonyms (comma separated)',
+                            prefixIcon: Icon(Icons.compare_arrows, color: Color(0xFF8DC71D)),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        LocaleTextFormField.english(
+                          controller: _otherFormsController,
+                          decoration: const InputDecoration(
+                            labelText: 'Other forms (comma separated)',
+                            prefixIcon: Icon(Icons.account_tree, color: Color(0xFF8DC71D)),
                           ),
                         ),
                         const SizedBox(height: 16),
@@ -595,12 +689,12 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                         ),
                         const SizedBox(height: 16),
 
-                        // Description
-                        TextFormField(
+                        LocaleTextFormField.turkish(
                           controller: _descriptionController,
+                          maxLines: 3,
                           decoration: InputDecoration(
-                            labelText: 'Description (Optional)',
-                            hintText: 'Add a description or note about the word',
+                            labelText: 'Notes (Optional)',
+                            hintText: 'Add a note about the word',
                             prefixIcon: const Icon(Icons.description, color: Color(0xFF8DC71D)),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -617,13 +711,12 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                             filled: true,
                             fillColor: Colors.white,
                           ),
-                          maxLines: 3,
                         ),
                         const SizedBox(height: 16),
 
-                        // Example Sentence
-                        TextFormField(
+                        LocaleTextFormField.english(
                           controller: _sentenceController,
+                          maxLines: 3,
                           decoration: InputDecoration(
                             labelText: 'Example Sentence (Optional)',
                             hintText: 'Add an example sentence using this word',
@@ -643,7 +736,6 @@ class _UpdateWordsPageState extends State<UpdateWordsPage> {
                             filled: true,
                             fillColor: Colors.white,
                           ),
-                          maxLines: 3,
                         ),
                         const SizedBox(height: 24),
 
